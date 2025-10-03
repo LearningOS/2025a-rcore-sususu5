@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::config::MAX_APP_NUM;
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
 use lazy_static::*;
@@ -54,6 +55,7 @@ lazy_static! {
         let mut tasks = [TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
+            syscall_times: [0; MAX_SYSCALL_NUM],
         }; MAX_APP_NUM];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
@@ -135,6 +137,26 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn update_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+    }
+
+    fn get_syscall_times(&self, syscall_id: usize) -> u32 {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id]
+    }
+
+    fn read_task_memory(&self, addr: *const u8) -> u8 {
+        unsafe { *addr }
+    }
+
+    fn write_task_memory(&self, addr: *mut u8, data: u8) {
+        unsafe { *addr = data }
+    }
 }
 
 /// Run the first task in task list.
@@ -168,4 +190,24 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Update syscall times for current task
+pub fn update_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.update_syscall_times(syscall_id);
+}
+
+/// Get syscall times for current task
+pub fn get_syscall_times(syscall_id: usize) -> u32 {
+    TASK_MANAGER.get_syscall_times(syscall_id)
+}
+
+/// Read a byte from current task's memory
+pub fn read_task_memory(addr: *const u8) -> u8 {
+    TASK_MANAGER.read_task_memory(addr)
+}
+
+/// Write a byte to current task's memory
+pub fn write_task_memory(addr: *mut u8, data: u8) {
+    TASK_MANAGER.write_task_memory(addr, data)
 }
