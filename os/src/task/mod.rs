@@ -25,7 +25,9 @@ mod task;
 use crate::fs::{open_file, OpenFlags};
 use alloc::sync::Arc;
 pub use context::TaskContext;
+use crate::mm::{VirtAddr, VirtPageNum};
 use lazy_static::*;
+use crate::mm::PTEFlags;
 pub use manager::{fetch_task, TaskManager};
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -53,6 +55,64 @@ pub fn suspend_current_and_run_next() {
     add_task(task);
     // jump to scheduling cycle
     schedule(task_cx_ptr);
+}
+
+/// Change the current program break
+pub fn change_program_brk(size: i32) -> Option<usize> {
+    let task = current_task().unwrap();
+    task.change_program_brk(size)
+}
+
+/// Update the syscall times for the current task
+pub fn update_syscall_times(syscall_id: usize) {
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.syscall_times[syscall_id] += 1;
+}
+
+/// Get the syscall times for the current task
+pub fn get_syscall_times(syscall_id: usize) -> u32 {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    inner.syscall_times[syscall_id]
+}
+
+/// Check if the address is readable
+pub fn check_address_readable(addr: usize) -> bool {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let vpn = VirtPageNum::from(VirtAddr::from(addr).floor());
+    if let Some(pte) = inner.memory_set.translate(vpn) {
+        pte.is_valid() && (pte.flags() & PTEFlags::U) != PTEFlags::empty()
+            && (pte.flags() & PTEFlags::R) != PTEFlags::empty()
+    } else {
+        false
+    }
+}
+
+/// Check if the address is writable
+pub fn check_address_writable(addr: usize) -> bool {
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    let vpn = VirtPageNum::from(VirtAddr::from(addr).floor());
+    if let Some(pte) = inner.memory_set.translate(vpn) {
+        pte.is_valid() && (pte.flags() & PTEFlags::U) != PTEFlags::empty()
+            && (pte.flags() & PTEFlags::W) != PTEFlags::empty()
+    } else {
+        false
+    }
+}
+
+/// mmap for the current task
+pub fn current_mmap(start: usize, len: usize, prot: usize) -> Option<()> {
+    let task = current_task().unwrap();
+    task.mmap(start, len, prot)
+}
+
+/// munmap for the current task
+pub fn current_munmap(start: usize, len: usize) -> Option<()> {
+    let task = current_task().unwrap();
+    task.munmap(start, len)
 }
 
 /// pid of usertests app in make run TEST=1
@@ -115,6 +175,7 @@ lazy_static! {
         TaskControlBlock::new(v.as_slice())
     });
 }
+
 
 ///Add init process to the manager
 pub fn add_initproc() {

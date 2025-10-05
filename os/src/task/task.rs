@@ -1,10 +1,13 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::config::{TRAP_CONTEXT_BASE, MAX_SYSCALL_NUM};
 use crate::sync::UPSafeCell;
+use crate::config::{PAGE_SIZE};
+use crate::mm::{
+    MapPermission, PhysPageNum, VirtAddr, VirtPageNum, KERNEL_SPACE, MemorySet,
+};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -71,6 +74,9 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Syscall times
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlockInner {
@@ -135,6 +141,7 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
                 })
             },
         };
@@ -216,6 +223,7 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
                 })
             },
         });
@@ -260,6 +268,91 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// mmap
+    pub fn mmap(&self, start: usize, len: usize, prot: usize) -> Option<()> {
+        if  start % PAGE_SIZE != 0 {
+            return None;
+        }
+        if (prot & !0x7) != 0 {
+            return None;
+        }
+        if (prot & 0x7) == 0 {
+            return None;
+        }
+        let len_aligned = if len == 0 {
+            0
+        } else {
+            ((len + PAGE_SIZE - 1) / PAGE_SIZE) * PAGE_SIZE
+        };
+
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len_aligned);
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        
+        {
+            let inner = self.inner_exclusive_access();
+            for vpn in start_vpn.0..end_vpn.0 {
+                if let Some(pte) = inner.memory_set.translate(VirtPageNum(vpn)) {
+                    if pte.is_valid() {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        let mut map_perm = MapPermission::U;
+        if (prot & 0x1) != 0 {
+            map_perm |= MapPermission::R;
+        }
+        if (prot & 0x2) != 0 {
+            map_perm |= MapPermission::W;
+        }
+        if (prot & 0x4) != 0 {
+            map_perm |= MapPermission::X;
+        }
+        
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.insert_framed_area(start_va, end_va, map_perm);
+
+        Some(())
+    }
+
+    /// munmap
+    pub fn munmap(&self, start: usize, len: usize) -> Option<()> {
+        if start % PAGE_SIZE != 0 {
+            return None;
+        }
+        if len == 0 {
+            return Some(());
+        }
+        if len % PAGE_SIZE != 0 {
+            return None;
+        }
+    
+        let start_va = VirtAddr::from(start);
+        let end_va   = VirtAddr::from(start + len);
+        let start_vpn = start_va.floor();
+        let end_vpn   = end_va.ceil();
+    
+        {
+            let inner = self.inner_exclusive_access();
+            for vpn in start_vpn.0..end_vpn.0 {
+                if let Some(pte) = inner.memory_set.translate(VirtPageNum(vpn)) {
+                    if !pte.is_valid() {
+                        return None;
+                    }
+                } else {
+                    return None;
+                }
+            }
+        }
+    
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.remove_area_with_start_vpn(start_vpn);
+        Some(())
     }
 }
 
