@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{PTEFlags, VirtAddr, VirtPageNum};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -153,6 +154,56 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    fn update_syscall_times(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+    }
+
+    fn get_syscall_times(&self, syscall_id: usize) -> u32 {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id]
+    }
+
+    fn check_address_readable(&self, addr: usize) -> bool {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memory_set = &inner.tasks[current].memory_set;
+        let vpn = VirtPageNum::from(VirtAddr::from(addr).floor());
+        if let Some(pte) = memory_set.translate(vpn) {
+            pte.is_valid() && (pte.flags() & PTEFlags::U) != PTEFlags::empty()
+                && (pte.flags() & PTEFlags::R) != PTEFlags::empty()
+        } else {
+            false
+        }
+    }
+
+    fn check_address_writable(&self, addr: usize) -> bool {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memory_set = &inner.tasks[current].memory_set;
+        let vpn = VirtPageNum::from(VirtAddr::from(addr).floor());
+        if let Some(pte) = memory_set.translate(vpn) {
+            pte.is_valid() && (pte.flags() & PTEFlags::U) != PTEFlags::empty()
+                && (pte.flags() & PTEFlags::W) != PTEFlags::empty()
+        } else {
+            false
+        }
+    }
+
+    fn current_mmap(&self, start: usize, len: usize, prot: usize) -> Option<()> {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].mmap(start, len, prot)
+    }
+
+    fn current_munmap(&self, start: usize, len: usize) -> Option<()> {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].munmap(start, len)
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +252,34 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Update the syscall times for the current task
+pub fn update_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.update_syscall_times(syscall_id)
+}
+
+/// Get the syscall times for the current task
+pub fn get_syscall_times(syscall_id: usize) -> u32 {
+    TASK_MANAGER.get_syscall_times(syscall_id)
+}
+
+/// Check if the address is readable
+pub fn check_address_readable(addr: usize) -> bool {
+    TASK_MANAGER.check_address_readable(addr)
+}
+
+/// Check if the address is writable
+pub fn check_address_writable(addr: usize) -> bool {
+    TASK_MANAGER.check_address_writable(addr)
+}
+
+/// mmap for the current task
+pub fn current_mmap(start: usize, len: usize, prot: usize) -> Option<()> {
+    TASK_MANAGER.current_mmap(start, len, prot)
+}
+
+/// munmap for the current task
+pub fn current_munmap(start: usize, len: usize) -> Option<()> {
+    TASK_MANAGER.current_munmap(start, len)
 }
