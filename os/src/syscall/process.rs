@@ -3,12 +3,15 @@ use alloc::sync::Arc;
 
 use crate::{
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str, translated_byte_buffer},
     task::{
-        add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        add_task, 
+        current_mmap, current_munmap, current_task, current_user_token, 
+        exit_current_and_run_next, suspend_current_and_run_next,
     },
+    timer::get_time_us,
 };
+use core::mem::size_of;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -105,30 +108,44 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    let us = get_time_us();
+    let sec = us / 1000000;
+    let usec = us % 1000000;
+    
+    let token = current_user_token();
+    let buffers = translated_byte_buffer(
+        token, ts as *const u8, size_of::<TimeVal>()
     );
-    -1
+    let timeval = TimeVal {sec, usec};
+    let bytes = unsafe {
+        core::slice::from_raw_parts(&timeval as *const TimeVal as *const u8, size_of::<TimeVal>())
+    };
+    let mut offset = 0;
+    for buffer in buffers {
+        let copy_len = buffer.len().min(bytes.len() - offset);
+        buffer[..copy_len].copy_from_slice(&bytes[offset..offset + copy_len]);
+        offset += copy_len;
+    }
+    0
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+// YOUR JOB: Implement mmap.
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    if current_mmap(start, len, prot).is_some() {
+        0
+    } else {
+        -1
+    }
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+// YOUR JOB: Implement munmap.
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    if current_munmap(start, len).is_some() {
+        0
+    } else {
+        -1
+    }
 }
 
 /// change data segment size
