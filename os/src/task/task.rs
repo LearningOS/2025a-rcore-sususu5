@@ -75,6 +75,12 @@ pub struct TaskControlBlockInner {
 
     /// Syscall times
     pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// Priority
+    pub priority: u64,
+
+    /// Stride
+    pub stride: u64,
 }
 
 impl TaskControlBlockInner {
@@ -82,16 +88,25 @@ impl TaskControlBlockInner {
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         self.trap_cx_ppn.get_mut()
     }
+
     /// get the user token
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
     }
-    fn get_status(&self) -> TaskStatus {
+
+    /// get the status
+    pub fn get_status(&self) -> TaskStatus {
         self.task_status
     }
+
     /// check if the task is zombie
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+
+    /// set priority
+    pub fn set_priority(&mut self, priority: u64) {
+        self.priority = priority;
     }
 }
 
@@ -127,6 +142,8 @@ impl TaskControlBlock {
                     heap_bottom: user_sp,
                     program_brk: user_sp,
                     syscall_times: [0; MAX_SYSCALL_NUM],
+                    priority: 16,
+                    stride: 0,
                 })
             },
         };
@@ -201,6 +218,8 @@ impl TaskControlBlock {
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
                     syscall_times: [0; MAX_SYSCALL_NUM],
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
                 })
             },
         });
