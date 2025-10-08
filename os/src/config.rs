@@ -25,3 +25,5 @@ pub const MEMORY_END: usize = 0x88000000;
 pub const MMIO: &[(usize, usize)] = &[(0x10001000, 0x1000)];
 /// max syscall number for tracking
 pub const MAX_SYSCALL_NUM: usize = 500;
+/// big stride for scheduler
+pub const BIG_STRIDE: u64 = u64::MAX;
