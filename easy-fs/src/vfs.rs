@@ -6,10 +6,12 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use spin::{Mutex, MutexGuard};
+
 /// Virtual filesystem layer over easy-fs
+#[allow(missing_docs)]
 pub struct Inode {
-    block_id: usize,
-    block_offset: usize,
+    pub block_id: usize,
+    pub block_offset: usize,
     fs: Arc<Mutex<EasyFileSystem>>,
     block_device: Arc<dyn BlockDevice>,
 }
@@ -182,5 +184,138 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+    
+    /// Get inode id (block_id)
+    pub fn get_inode_id(&self) -> u32 {
+        self.block_id as u32
+    }
+
+    /// Get nlink count of this inode by counting directory entries that reference it
+    pub fn get_nlink(&self) -> u32 {
+        let target_block_id = self.block_id as u32;
+        let target_block_offset = self.block_offset;
+        let fs_arc = self.fs.clone();
+        let root_inode = EasyFileSystem::root_inode(&fs_arc);
+        let block_device = root_inode.block_device.clone();
+        let fs_guard = fs_arc.lock();
+        let fs_ref: &EasyFileSystem = &*fs_guard;
+        root_inode.read_disk_inode(|disk_inode| {
+            assert!(disk_inode.is_dir());
+            let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            let mut count = 0;
+            for i in 0..file_count {
+                assert_eq!(
+                    disk_inode.read_at(i * DIRENT_SZ, dirent.as_bytes_mut(), &block_device),
+                    DIRENT_SZ,
+                );
+                let (block_id, block_offset) = fs_ref.get_disk_inode_pos(dirent.inode_id());
+                if block_id == target_block_id && block_offset == target_block_offset {
+                    count += 1;
+                }
+            }
+            count
+        })
+    }
+
+    /// Link a file to another file
+    pub fn link(&self, old_name: &str, new_name: &str) -> Option<Arc<Inode>> {
+        if old_name == new_name {
+            return None;
+        }
+        let mut fs = self.fs.lock();
+        let old_inode_id = self.read_disk_inode(|root_inode| self.find_inode_id(old_name, root_inode));
+        if old_inode_id.is_none() {
+            return None;
+        }
+        if self
+            .read_disk_inode(|root_inode| self.find_inode_id(new_name, root_inode))
+            .is_some()
+        {
+            return None;
+        }
+        let inode_id = old_inode_id.unwrap();
+        let (new_inode_block_id, new_inode_block_offset) = fs.get_disk_inode_pos(inode_id);
+        self.modify_disk_inode(|root_inode| {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let dirent = DirEntry::new(new_name, inode_id);
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+        block_cache_sync_all();
+        Some(Arc::new(Self::new(
+            new_inode_block_id,
+            new_inode_block_offset,
+            self.fs.clone(),
+            self.block_device.clone(),
+        )))
+    }
+
+    /// Unlink a file from current inode
+    pub fn unlink(&self, name: &str) -> isize {
+        let Some(_inode_id) =
+            self.read_disk_inode(|root_inode| self.find_inode_id(name, root_inode))
+        else {
+            return -1;
+        };
+        let removed = self.modify_disk_inode(|root_inode| {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            if file_count == 0 {
+                return false;
+            }
+            let mut entry = DirEntry::empty();
+            let mut last_entry = DirEntry::empty();
+            for i in 0..file_count {
+                assert_eq!(
+                    root_inode.read_at(i * DIRENT_SZ, entry.as_bytes_mut(), &self.block_device),
+                    DIRENT_SZ,
+                );
+                if entry.name() == name {
+                    if file_count > 1 {
+                        assert_eq!(
+                            root_inode.read_at(
+                                (file_count - 1) * DIRENT_SZ,
+                                last_entry.as_bytes_mut(),
+                                &self.block_device
+                            ),
+                            DIRENT_SZ,
+                        );
+                        if i != file_count - 1 {
+                            root_inode.write_at(
+                                i * DIRENT_SZ,
+                                last_entry.as_bytes(),
+                                &self.block_device,
+                            );
+                        }
+                        let empty = DirEntry::empty();
+                        root_inode.write_at(
+                            (file_count - 1) * DIRENT_SZ,
+                            empty.as_bytes(),
+                            &self.block_device,
+                        );
+                    } else {
+                        let empty = DirEntry::empty();
+                        root_inode.write_at(0, empty.as_bytes(), &self.block_device);
+                    }
+                    root_inode.size -= DIRENT_SZ as u32;
+                    return true;
+                }
+            }
+            false
+        });
+        if removed {
+            block_cache_sync_all();
+            0
+        } else {
+            -1
+        }
     }
 }

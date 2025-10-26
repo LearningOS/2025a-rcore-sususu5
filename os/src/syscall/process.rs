@@ -182,6 +182,6 @@ pub fn sys_set_priority(prio: isize) -> isize {
         return -1;
     }
     let task = current_task().unwrap();
-    task.inner.exclusive_access().set_priority(prio as u64);
+    task.inner_exclusive_access().set_priority(prio as u64);
     prio
 }

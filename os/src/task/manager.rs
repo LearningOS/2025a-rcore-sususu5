@@ -28,7 +28,7 @@ impl TaskManager {
         let mut min_index = 0;
         let mut min_stride = 0x7f_ff_ff_ff_ff_ff_ff_ff;
         for (idx, task) in self.ready_queue.iter().enumerate() {
-            let inner = task.inner.exclusive_access();
+            let inner = task.inner_exclusive_access();
             if inner.get_status() == TaskStatus::Ready {
                 if inner.stride < min_stride {
                     min_stride = inner.stride;
@@ -38,7 +38,7 @@ impl TaskManager {
         }
         
         if let Some(task) = self.ready_queue.get(min_index) {
-            let mut inner = task.inner.exclusive_access();
+            let mut inner = task.inner_exclusive_access();
             inner.stride += BIG_STRIDE / inner.priority;
         }
         self.ready_queue.remove(min_index)
