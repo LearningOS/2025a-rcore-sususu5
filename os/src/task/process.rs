@@ -49,6 +49,12 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// available mutex resources
+    pub m_available: Vec<usize>,
+    /// available semaphore resources
+    pub s_available: Vec<usize>,
+    /// whether deadlock detection is enabled
+    pub use_dead_lock: bool,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +125,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    m_available: Vec::new(),
+                    s_available: Vec::new(),
+                    use_dead_lock: false,
                 })
             },
         });
@@ -150,7 +159,6 @@ impl ProcessControlBlock {
         add_task(task);
         process
     }
-
     /// Only support processes with a single thread.
     pub fn exec(self: &Arc<Self>, elf_data: &[u8], args: Vec<String>) {
         trace!("kernel: exec");
@@ -245,6 +253,9 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    m_available: Vec::new(),
+                    s_available: Vec::new(),
+                    use_dead_lock: false,
                 })
             },
         });
@@ -282,4 +293,146 @@ impl ProcessControlBlock {
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
+}
+
+impl ProcessControlBlockInner {
+    pub fn expand_mutex_slot(&mut self, id: usize) {
+        if self.m_available.len() <= id {
+            self.m_available.resize(id + 1, 0);
+        }
+        for task in self.tasks.iter().filter_map(|t| t.as_ref()) {
+            let mut task_inner = task.inner_exclusive_access();
+            if task_inner.m_allocation.len() <= id {
+                task_inner.m_allocation.resize(id + 1, 0);
+            }
+            if task_inner.m_need.len() <= id {
+                task_inner.m_need.resize(id + 1, 0);
+            }
+        }
+    }
+
+    pub fn expand_semaphore_slot(&mut self, id: usize) {
+        if self.s_available.len() <= id {
+            self.s_available.resize(id + 1, 0);
+        }
+        for task in self.tasks.iter().filter_map(|t| t.as_ref()) {
+            let mut task_inner = task.inner_exclusive_access();
+            if task_inner.s_allocation.len() <= id {
+                task_inner.s_allocation.resize(id + 1, 0);
+            }
+            if task_inner.s_need.len() <= id {
+                task_inner.s_need.resize(id + 1, 0);
+            }
+        }
+    }
+
+    pub fn is_mutex_state_safe(&self) -> bool {
+        let states = self.collect_mutex_states();
+        is_state_safe(&self.m_available, states)
+    }
+
+    pub fn is_semaphore_state_safe(&self) -> bool {
+        let states = self.collect_semaphore_states();
+        is_state_safe(&self.s_available, states)
+    }
+
+    fn collect_mutex_states(&self) -> Vec<Option<(Vec<usize>, Vec<usize>)>> {
+        let len = self.m_available.len();
+        self.tasks
+            .iter()
+            .map(|task_opt| {
+                task_opt.as_ref().map(|task| {
+                    let mut inner = task.inner_exclusive_access();
+                    if inner.m_allocation.len() < len {
+                        inner.m_allocation.resize(len, 0);
+                    }
+                    if inner.m_need.len() < len {
+                        inner.m_need.resize(len, 0);
+                    }
+                    let allocation = inner.m_allocation.clone();
+                    let need = inner.m_need.clone();
+                    (allocation, need)})
+            })
+            .collect()
+    }
+
+    fn collect_semaphore_states(&self) -> Vec<Option<(Vec<usize>, Vec<usize>)>> {
+        let len = self.s_available.len();
+        self.tasks
+            .iter()
+            .map(|task_opt| {
+                task_opt.as_ref().map(|task| {
+                    let mut inner = task.inner_exclusive_access();
+                    if inner.s_allocation.len() < len {
+                        inner.s_allocation.resize(len, 0);
+                    }
+                    if inner.s_need.len() < len {
+                        inner.s_need.resize(len, 0);
+                    }
+                    let allocation = inner.s_allocation.clone();
+                    let need = inner.s_need.clone();
+
+                    (allocation, need)})
+            })
+            .collect()
+    }
+}
+
+fn is_state_safe(available: &[usize], states: Vec<Option<(Vec<usize>, Vec<usize>)>>) -> bool {
+    let mut work = available.to_vec();
+    let mut resource_len = work.len();
+    for state in states.iter() {
+        if let Some((alloc, need)) = state {
+            resource_len = resource_len.max(alloc.len());
+            resource_len = resource_len.max(need.len());
+        }
+    }
+    work.resize(resource_len, 0);
+
+    let mut allocations = Vec::with_capacity(states.len());
+    let mut needs = Vec::with_capacity(states.len());
+    let mut finish = Vec::with_capacity(states.len());
+
+    for state in states.into_iter() {
+        match state {
+            Some((mut alloc, mut need)) => {
+                if alloc.len() < resource_len {
+                    alloc.resize(resource_len, 0);
+                }
+                if need.len() < resource_len {
+                    need.resize(resource_len, 0);
+                }
+                allocations.push(alloc);
+                needs.push(need);
+                finish.push(false);
+            }
+            None => {
+                allocations.push(vec![0; resource_len]);
+                needs.push(vec![0; resource_len]);
+                finish.push(true);
+            }
+        }
+    }
+
+    loop {
+        let mut progressed = false;
+        for i in 0..allocations.len() {
+            if finish[i] {
+                continue;
+            }
+            let can_finish = (0..resource_len).all(|j| needs[i][j] <= work[j]);
+            if can_finish {
+                for j in 0..resource_len {
+                    work[j] = work[j].saturating_add(allocations[i][j]);
+                }
+                finish[i] = true;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    finish.into_iter().all(|done| done)
 }
